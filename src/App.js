@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
-import { dbGet, dbSet } from './supabase';
+import { useState, useEffect, useCallback } from "react";
+import { dbGet, dbSet } from "./supabase";
+
 
 const GR = {
   A:["México 🇲🇽","Sudáfrica 🇿🇦","Corea del Sur 🇰🇷","Chequia 🇨🇿"],
@@ -94,17 +95,26 @@ const PM = [
 const MULT={grupos:1,octavos:1.5,cuartos:2,semifinales:3,final:5};
 const PHL={grupos:"Grupos",octavos:"Octavos",cuartos:"Cuartos",semifinales:"Semis",final:"Final"};
 const CUOTA=20;
-const PIN="1234";
+const PIN="4805";
+const PRIMER_PARTIDO=new Date("2026-06-11T21:00:00+02:00"); // Madrid time
 
-function mPts(pred,res,ph){
+// ── SCORING ───────────────────────────────────────────────────────────────────
+// fetiche: si acierta exacto x3, si acierta 1X2 x2, si falla x1 (normal)
+function mPts(pred,res,ph,isFetiche){
   if(!pred||!res)return 0;
   const m=MULT[ph]||1,rl=+res.l,rv=+res.v,pl=+pred.l,pv=+pred.v;
   if([rl,rv,pl,pv].some(isNaN))return 0;
   let b=0;
-  if(pl===rl&&pv===rv)b+=5;
+  const exacto=pl===rl&&pv===rv;
+  if(exacto)b+=5;
   else{const rw=rl>rv?"L":rv>rl?"V":"E",pw=pl>pv?"L":pv>pl?"V":"E";if(rw===pw)b+=2;}
   if(pl===rl)b+=1;if(pv===rv)b+=1;
-  return Math.round(b*m*10)/10;
+  let pts=Math.round(b*m*10)/10;
+  if(isFetiche){
+    if(exacto)pts=Math.round(pts*3*10)/10;
+    else if(b>=2)pts=Math.round(pts*2*10)/10;
+  }
+  return pts;
 }
 function prePts(p,r){
   let x=0;if(!r||!p)return x;
@@ -129,12 +139,70 @@ function totPts(part,allM,rPre,rSpc){
   let t=0;
   t+=prePts(part.pre||{},rPre);
   t+=spcPts(part.spc||{},rSpc);
-  (allM||[]).forEach(m=>{t+=mPts((part.mp||{})[m.id],m.result,m.ph||"grupos");});
+  const fetiche=part.fetiche||null;
+  (allM||[]).forEach(m=>{t+=mPts((part.mp||{})[m.id],m.result,m.ph||"grupos",m.id===fetiche);});
   return Math.round(t*10)/10;
 }
+
+// ── STORAGE ───────────────────────────────────────────────────────────────────
+
+
 function fd(s){if(!s)return"";const[y,m,d]=s.split("-");return`${d}/${m}/${y}`;}
 function isPast(d){return d?new Date()>new Date(d+"T23:59:59"):false;}
 
+// ── COUNTDOWN ────────────────────────────────────────────────────────────────
+function useCountdown(target){
+  const[t,setT]=useState(Math.max(0,target-Date.now()));
+  useEffect(()=>{
+    if(t<=0)return;
+    const i=setInterval(()=>setT(Math.max(0,target-Date.now())),1000);
+    return()=>clearInterval(i);
+  },[target,t]);
+  const s=Math.floor(t/1000);
+  const days=Math.floor(s/86400);
+  const hrs=Math.floor((s%86400)/3600);
+  const mins=Math.floor((s%3600)/60);
+  const secs=s%60;
+  return{days,hrs,mins,secs,done:t<=0};
+}
+
+// ── EXPORT ───────────────────────────────────────────────────────────────────
+function exportCSV(parts,allM,rPre,rSpc){
+  const rows=[["Participante","Total pts","Campeón","Subcampeón","3er puesto","Goleador","MVP","Fetiche"]];
+  const sorted=[...parts].sort((a,b)=>totPts(b,allM,rPre,rSpc)-totPts(a,allM,rPre,rSpc));
+  sorted.forEach(p=>{
+    rows.push([
+      p.name,
+      totPts(p,allM,rPre,rSpc),
+      p.pre?.campeon||"-",
+      p.pre?.subcampeon||"-",
+      p.pre?.tercero||"-",
+      p.pre?.goleador||"-",
+      p.pre?.mvp||"-",
+      p.fetiche||"-"
+    ]);
+  });
+  rows.push([]);
+  rows.push(["=== PRONÓSTICOS POR PARTIDO ==="]);
+  rows.push(["Participante","Partido","Pronóstico","Resultado real","Pts"]);
+  allM.filter(m=>m.result).forEach(m=>{
+    sorted.forEach(p=>{
+      const pred=(p.mp||{})[m.id];
+      if(pred){
+        const pts=mPts(pred,m.result,m.ph||"grupos",m.id===p.fetiche);
+        rows.push([p.name,`${m.l} vs ${m.v}`,`${pred.l}-${pred.v}`,`${m.result.l}-${m.result.v}`,pts]);
+      }
+    });
+  });
+  const csv=rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
+  const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;a.download="porra-mundial-2026.csv";a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── HELPERS UI ────────────────────────────────────────────────────────────────
 function TeamSel({val,onChange,placeholder,disabled}){
   return(
     <select style={{...S.sel,opacity:disabled?.6:1}} value={val||""} onChange={e=>onChange(e.target.value)} disabled={disabled}>
@@ -147,7 +215,6 @@ function TeamSel({val,onChange,placeholder,disabled}){
     </select>
   );
 }
-
 function Chip({label,done,total}){
   const pct=total>0?Math.round(done/total*100):0;
   const col=pct===100?"#4ade80":pct>0?"#fbbf24":"#2a2a2a";
@@ -161,13 +228,38 @@ function Chip({label,done,total}){
     </div>
   );
 }
-
 function Pos({n}){
   const bg=n===1?"linear-gradient(135deg,#FFD700,#f59e0b)":n===2?"linear-gradient(135deg,#e2e8f0,#94a3b8)":n===3?"linear-gradient(135deg,#cd7f32,#92400e)":"#1a1a1a";
   const col=n<=2?"#000":"#fff";
   return <div style={{width:30,height:30,borderRadius:"50%",background:bg,color:col,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:13,flexShrink:0}}>{n}</div>;
 }
 
+// ── COUNTDOWN WIDGET ─────────────────────────────────────────────────────────
+function CountdownWidget(){
+  const{days,hrs,mins,secs,done}=useCountdown(PRIMER_PARTIDO.getTime());
+  if(done)return(
+    <div style={{background:"linear-gradient(135deg,#052e16,#064e3b)",border:"1px solid #4ade80",borderRadius:12,padding:"12px 16px",marginBottom:14,textAlign:"center"}}>
+      <div style={{fontSize:20}}>⚽</div>
+      <div style={{color:"#4ade80",fontWeight:700,fontSize:14,marginTop:4}}>¡El Mundial ya ha comenzado!</div>
+    </div>
+  );
+  const pad=n=>String(n).padStart(2,"0");
+  return(
+    <div style={{background:"linear-gradient(135deg,#0a0a2a,#14142e)",border:"1px solid #fbbf2444",borderRadius:12,padding:"12px 16px",marginBottom:14}}>
+      <div style={{textAlign:"center",fontSize:11,color:"#888",marginBottom:8,letterSpacing:2,textTransform:"uppercase"}}>⚽ México vs Sudáfrica · 11 Jun · 21:00h</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:6}}>
+        {[[days,"DÍAS"],[hrs,"HORAS"],[mins,"MIN"],[pad(secs),"SEG"]].map(([v,l])=>(
+          <div key={l} style={{background:"#0d0d14",borderRadius:8,padding:"8px 4px",textAlign:"center",border:"1px solid #1e1e2e"}}>
+            <div style={{fontWeight:900,fontSize:24,color:"#fbbf24",lineHeight:1}}>{v}</div>
+            <div style={{fontSize:9,color:"#555",marginTop:2,letterSpacing:1}}>{l}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── APP ───────────────────────────────────────────────────────────────────────
 export default function App(){
   const[db,setDb]=useState({parts:[],extraM:[],results:{},rPre:null,rSpc:null,deadline:"",loaded:false});
   const[view,setView]=useState("welcome");
@@ -212,10 +304,11 @@ export default function App(){
     <div style={{...S.app,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",padding:"24px",background:"radial-gradient(ellipse at top,#1a1a3e,#080810)"}}>
       <div style={{fontSize:64,marginBottom:8}}>🏆</div>
       <div style={{fontSize:32,fontWeight:900,color:"#fbbf24",letterSpacing:3,marginBottom:4}}>SÚPER PORRA</div>
-      <div style={{fontSize:13,color:"#666",letterSpacing:4,marginBottom:28}}>MUNDIAL 2026</div>
+      <div style={{fontSize:13,color:"#666",letterSpacing:4,marginBottom:20}}>MUNDIAL 2026</div>
+      <CountdownWidget/>
       <div style={{width:"100%",maxWidth:400,background:"#0d0d14",border:"1px solid #1e1e2e",borderRadius:14,padding:"18px",marginBottom:24}}>
         <div style={{color:"#fbbf24",fontWeight:700,fontSize:13,marginBottom:12}}>📋 Cómo funciona</div>
-        {[["🎟","Inscripción","20€ — una vez confirmado, bloqueado para siempre"],["⚽","72 partidos","Pronostica todos los de fase de grupos"],["📈","Multiplicadores","×1 grupos · ×1.5 octavos · hasta ×5 final"],["⭐","Retos especiales","Primer expulsado, hat-trick, revelación…"],["💰","Premios","60% · 30% · 10% del bote total"]].map(([i,t,d])=>(
+        {[["🎟","Inscripción","20€ — una vez confirmado, bloqueado para siempre"],["⚽","72 partidos","Pronostica todos los partidos de la fase de grupos"],["⭐","Partido fetiche","Márcalo: si aciertas exacto ×3, si aciertas 1X2 ×2"],["📈","Multiplicadores","×1 grupos · ×1.5 octavos · hasta ×5 final"],["💰","Premios","60% · 25% · 15% del bote total"]].map(([i,t,d])=>(
           <div key={t} style={{display:"flex",gap:10,marginBottom:10}}>
             <span style={{fontSize:16,flexShrink:0}}>{i}</span>
             <div><div style={{color:"#fff",fontWeight:600,fontSize:13}}>{t}</div><div style={{color:"#555",fontSize:12}}>{d}</div></div>
@@ -290,8 +383,9 @@ export default function App(){
       <div style={S.content}>
         {tab==="ranking"&&(
           <div>
+            <CountdownWidget/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
-              {[{pct:.6,l:"1º",col:"#fbbf24",ico:"🥇"},{pct:.3,l:"2º",col:"#cbd5e1",ico:"🥈"},{pct:.1,l:"3º",col:"#cd7f32",ico:"🥉"}].map((p,i)=>(
+              {[{pct:.6,l:"1º",col:"#fbbf24",ico:"🥇"},{pct:.25,l:"2º",col:"#cbd5e1",ico:"🥈"},{pct:.15,l:"3º",col:"#cd7f32",ico:"🥉"}].map((p,i)=>(
                 <div key={i} style={{background:"#0d0d14",border:"1px solid "+p.col+"44",borderRadius:10,padding:"10px 8px",textAlign:"center"}}>
                   <div style={{fontSize:20}}>{p.ico}</div>
                   <div style={{color:p.col,fontWeight:900,fontSize:18}}>{Math.round(bote*p.pct)}€</div>
@@ -306,11 +400,14 @@ export default function App(){
                   <Pos n={i+1}/>
                   <div style={{flex:1}}>
                     <div style={{fontWeight:700,color:"#fff"}}>{p.name}</div>
-                    {allLocked&&p.pre?.campeon&&<div style={{fontSize:11,color:"#444",marginTop:1}}>🏆 {p.pre.campeon.split(" ")[0]}</div>}
+                    <div style={{display:"flex",gap:6,marginTop:2,flexWrap:"wrap"}}>
+                      {allLocked&&p.pre?.campeon&&<div style={{fontSize:11,color:"#444"}}>🏆 {p.pre.campeon.split(" ")[0]}</div>}
+                      {p.fetiche&&<div style={{fontSize:11,color:"#fbbf24"}}>⭐ {(allM.find(m=>m.id===p.fetiche)||{l:"?"}).l?.split(" ")[0]}</div>}
+                    </div>
                   </div>
                   <div style={{textAlign:"right"}}>
                     <div style={{fontWeight:900,fontSize:20,color:i===0?"#fbbf24":i<3?"#4ade80":"#bbb"}}>{p.tot}<span style={{fontSize:11,color:"#333",fontWeight:400}}> pts</span></div>
-                    {i<3&&bote>0&&<div style={{fontSize:11,color:"#4ade80"}}>+{Math.round(bote*[.6,.3,.1][i])}€</div>}
+                    {i<3&&bote>0&&<div style={{fontSize:11,color:"#4ade80"}}>+{Math.round(bote*[.6,.25,.15][i])}€</div>}
                   </div>
                   {allLocked&&<button style={{...S.btnGhost,fontSize:11,padding:"3px 7px",marginLeft:4}} onClick={()=>{setSelId(p.id);setView("compare");}}>📊</button>}
                 </div>
@@ -321,6 +418,7 @@ export default function App(){
             </div>}
           </div>
         )}
+
         {tab==="pronos"&&(
           <div>
             <div style={{...S.regCard,...(closed?{opacity:.6}:{})}}>
@@ -337,15 +435,17 @@ export default function App(){
                 const mD=PM.filter(m=>mp[m.id]&&mp[m.id].l!==""&&mp[m.id].v!=="").length;
                 const pD=[p.pre?.campeon,p.pre?.subcampeon,p.pre?.tercero,p.pre?.goleador,p.pre?.mvp].filter(Boolean).length;
                 const sD=[p.spc?.expulsado,p.spc?.hattrick,p.spc?.revelacion,p.spc?.goleada].filter(Boolean).length;
+                const feticheM=allM.find(m=>m.id===p.fetiche);
                 return(
                   <div key={p.id} style={S.card}>
                     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:10}}>
                       <div>
-                        <div style={{display:"flex",alignItems:"center",gap:6}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                           <span style={{fontWeight:700,fontSize:15,color:"#fff"}}>{p.name}</span>
                           {p.locked&&<span style={{fontSize:10,background:"#0d1a0d",color:"#4ade80",border:"1px solid #4ade8033",borderRadius:10,padding:"1px 7px"}}>🔒</span>}
                         </div>
                         <div style={{fontWeight:800,fontSize:18,color:"#4ade80",marginTop:2}}>{sc?.tot||0}<span style={{fontSize:11,color:"#333",fontWeight:400}}> pts</span></div>
+                        {feticheM&&<div style={{fontSize:11,color:"#fbbf24",marginTop:2}}>⭐ Fetiche: {feticheM.l.split(" ")[0]} vs {feticheM.v.split(" ")[0]}</div>}
                       </div>
                       {!p.locked&&!closed&&<button style={S.btnGold} onClick={()=>{setSelId(p.id);setView("predict");}}>✏️ Editar</button>}
                     </div>
@@ -367,12 +467,13 @@ export default function App(){
   );
 }
 
+// ── REGISTER ──────────────────────────────────────────────────────────────────
 function RegisterView({db,upDb,closed,onDone,onBack}){
   const[step,setStep]=useState("form");
   const[name,setName]=useState("");
   const[err,setErr]=useState("");
   const[saving,setSaving]=useState(false);
-  const[draft,setDraft]=useState({pre:{campeon:"",subcampeon:"",tercero:"",goleador:"",mvp:"",semis:["","","",""]},spc:{expulsado:"",hattrick:"",revelacion:"",goleada:""},mp:{}});
+  const[draft,setDraft]=useState({pre:{campeon:"",subcampeon:"",tercero:"",goleador:"",mvp:"",semis:["","","",""]},spc:{expulsado:"",hattrick:"",revelacion:"",goleada:""},mp:{},fetiche:null});
   const[sec,setSec]=useState("pre");
   const[gr,setGr]=useState("A");
 
@@ -384,7 +485,7 @@ function RegisterView({db,upDb,closed,onDone,onBack}){
   };
   const confirm=async()=>{
     setSaving(true);
-    const np={id:Date.now().toString(),name:name.trim(),pre:draft.pre,spc:draft.spc,mp:draft.mp,locked:true,registeredAt:new Date().toISOString()};
+    const np={id:Date.now().toString(),name:name.trim(),pre:draft.pre,spc:draft.spc,mp:draft.mp,fetiche:draft.fetiche,locked:true,registeredAt:new Date().toISOString()};
     await upDb("parts",[...(db.parts||[]),np]);
     setSaving(false);onDone();
   };
@@ -392,6 +493,7 @@ function RegisterView({db,upDb,closed,onDone,onBack}){
   const upSemi=(i,v)=>setDraft(d=>{const s=[...(d.pre.semis||["","","",""])];s[i]=v;return{...d,pre:{...d.pre,semis:s}};});
   const upSpc=(k,v)=>setDraft(d=>({...d,spc:{...d.spc,[k]:v}}));
   const upM=(id,side,v)=>setDraft(d=>({...d,mp:{...d.mp,[id]:{...(d.mp[id]||{}),[side]:v}}}));
+  const setFetiche=(id)=>setDraft(d=>({...d,fetiche:d.fetiche===id?null:id}));
   const grupoM=PM.filter(m=>m.g===gr);
 
   if(closed)return(
@@ -428,7 +530,7 @@ function RegisterView({db,upDb,closed,onDone,onBack}){
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,padding:"10px 16px",background:"#080810",borderBottom:"1px solid #141420"}}>
             <Chip label="Pre-Mundial" done={[draft.pre.campeon,draft.pre.subcampeon,draft.pre.tercero,draft.pre.goleador,draft.pre.mvp].filter(Boolean).length} total={5}/>
             <Chip label="Partidos" done={PM.filter(m=>draft.mp[m.id]&&draft.mp[m.id].l!==""&&draft.mp[m.id].v!=="").length} total={72}/>
-            <Chip label="Retos" done={[draft.spc.expulsado,draft.spc.hattrick,draft.spc.revelacion,draft.spc.goleada].filter(Boolean).length} total={4}/>
+            <Chip label="Fetiche" done={draft.fetiche?1:0} total={1}/>
           </div>
           <div style={S.secNav}>
             {[["pre","🏆 Pre"],["grupos","⚽ Grupos"],["elim","🏟 Elim."],["retos","⭐ Retos"]].map(([id,l])=>(
@@ -437,10 +539,11 @@ function RegisterView({db,upDb,closed,onDone,onBack}){
           </div>
           <div style={S.content}>
             {sec==="pre"&&<PreSec pre={draft.pre} upPre={upPre} upSemi={upSemi} locked={false}/>}
-            {sec==="grupos"&&<GruposSec mp={draft.mp} gr={gr} setGr={setGr} upM={upM} grupoM={grupoM} results={{}} locked={false}/>}
-            {sec==="elim"&&<ElimSec mp={draft.mp} upM={upM} elimM={[]} locked={false}/>}
+            {sec==="grupos"&&<GruposSec mp={draft.mp} gr={gr} setGr={setGr} upM={upM} grupoM={grupoM} results={{}} locked={false} fetiche={draft.fetiche} setFetiche={setFetiche}/>}
+            {sec==="elim"&&<ElimSec mp={draft.mp} upM={upM} elimM={[]} locked={false} fetiche={draft.fetiche} setFetiche={setFetiche}/>}
             {sec==="retos"&&<RetosSec spc={draft.spc} upSpc={upSpc} locked={false}/>}
             <div style={{height:10}}/>
+            {!draft.fetiche&&<div style={{background:"#1a1a00",border:"1px solid #fbbf2444",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#fbbf24",marginBottom:10}}>⭐ ¡No olvides marcar tu partido fetiche! (estrella junto a cualquier partido)</div>}
             <button style={{...S.btnGold,width:"100%",padding:"14px",fontSize:15,borderRadius:12,...(saving?{opacity:.5}:{})}} onClick={!saving?confirm:undefined}>{saving?"Guardando…":"✅ Confirmar y bloquear"}</button>
             <div style={{color:"#333",fontSize:11,textAlign:"center",marginTop:5}}>⚠ Una vez confirmado no podrás modificarlos</div>
           </div>
@@ -450,8 +553,9 @@ function RegisterView({db,upDb,closed,onDone,onBack}){
   );
 }
 
+// ── PREDICT VIEW ──────────────────────────────────────────────────────────────
 function PredictView({p,allM,db,onSave,onBack}){
-  const[data,setData]=useState({...p,pre:p.pre||{campeon:"",subcampeon:"",tercero:"",goleador:"",mvp:"",semis:["","","",""]},spc:p.spc||{expulsado:"",hattrick:"",revelacion:"",goleada:""},mp:p.mp||{}});
+  const[data,setData]=useState({...p,pre:p.pre||{campeon:"",subcampeon:"",tercero:"",goleador:"",mvp:"",semis:["","","",""]},spc:p.spc||{expulsado:"",hattrick:"",revelacion:"",goleada:""},mp:p.mp||{},fetiche:p.fetiche||null});
   const[sec,setSec]=useState("pre");
   const[gr,setGr]=useState("A");
   const[saving,setSaving]=useState(false);
@@ -462,6 +566,7 @@ function PredictView({p,allM,db,onSave,onBack}){
   const upSemi=(i,v)=>setData(d=>{const s=[...(d.pre.semis||["","","",""])];s[i]=v;return{...d,pre:{...d.pre,semis:s}};});
   const upSpc=(k,v)=>setData(d=>({...d,spc:{...d.spc,[k]:v}}));
   const upM=(id,side,v)=>setData(d=>({...d,mp:{...d.mp,[id]:{...(d.mp[id]||{}),[side]:v}}}));
+  const setFetiche=(id)=>setData(d=>({...d,fetiche:d.fetiche===id?null:id}));
   const mp=data.mp||{};
   return(
     <div style={S.app}>
@@ -477,7 +582,7 @@ function PredictView({p,allM,db,onSave,onBack}){
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,padding:"10px 16px",background:"#080810",borderBottom:"1px solid #141420"}}>
         <Chip label="Pre-Mundial" done={[data.pre?.campeon,data.pre?.subcampeon,data.pre?.tercero,data.pre?.goleador,data.pre?.mvp].filter(Boolean).length} total={5}/>
         <Chip label="Partidos" done={PM.filter(m=>mp[m.id]&&mp[m.id].l!==""&&mp[m.id].v!=="").length} total={72}/>
-        <Chip label="Retos" done={[data.spc?.expulsado,data.spc?.hattrick,data.spc?.revelacion,data.spc?.goleada].filter(Boolean).length} total={4}/>
+        <Chip label="Fetiche" done={data.fetiche?1:0} total={1}/>
       </div>
       <div style={S.secNav}>
         {[["pre","🏆 Pre"],["grupos","⚽ Grupos"],["elim","🏟 Elim."],["retos","⭐ Retos"]].map(([id,l])=>(
@@ -486,8 +591,8 @@ function PredictView({p,allM,db,onSave,onBack}){
       </div>
       <div style={S.content}>
         {sec==="pre"&&<PreSec pre={data.pre} upPre={upPre} upSemi={upSemi} locked={locked||!!db.rPre}/>}
-        {sec==="grupos"&&<GruposSec mp={mp} gr={gr} setGr={setGr} upM={upM} grupoM={grupoM} results={db.results||{}} locked={locked}/>}
-        {sec==="elim"&&<ElimSec mp={mp} upM={upM} elimM={elimM} locked={locked}/>}
+        {sec==="grupos"&&<GruposSec mp={mp} gr={gr} setGr={setGr} upM={upM} grupoM={grupoM} results={db.results||{}} locked={locked} fetiche={data.fetiche} setFetiche={setFetiche}/>}
+        {sec==="elim"&&<ElimSec mp={mp} upM={upM} elimM={elimM} locked={locked} fetiche={data.fetiche} setFetiche={setFetiche}/>}
         {sec==="retos"&&<RetosSec spc={data.spc} upSpc={upSpc} locked={locked}/>}
         {!locked&&<><div style={{height:10}}/><button style={{...S.btnGold,width:"100%",padding:"14px",fontSize:15}} onClick={async()=>{setSaving(true);await onSave(data);setSaving(false);}}>💾 Confirmar y bloquear</button><div style={{color:"#333",fontSize:11,textAlign:"center",marginTop:5}}>⚠ No podrás modificarlos después</div></>}
       </div>
@@ -495,6 +600,7 @@ function PredictView({p,allM,db,onSave,onBack}){
   );
 }
 
+// ── PRE SECTION ───────────────────────────────────────────────────────────────
 function PreSec({pre,upPre,upSemi,locked}){
   return(
     <div>
@@ -530,17 +636,20 @@ function PreSec({pre,upPre,upSemi,locked}){
   );
 }
 
-function GruposSec({mp,gr,setGr,upM,grupoM,results,locked}){
+// ── GRUPOS SECTION ────────────────────────────────────────────────────────────
+function GruposSec({mp,gr,setGr,upM,grupoM,results,locked,fetiche,setFetiche}){
   const gs=Object.keys(GR);
   return(
     <div>
-      <div style={{fontSize:12,color:"#444",marginBottom:8}}>Pronostica el marcador de cada partido · ×1 en grupos</div>
+      <div style={{fontSize:12,color:"#444",marginBottom:4}}>Pronostica el marcador · ×1 en grupos</div>
+      <div style={{fontSize:11,color:"#fbbf24",marginBottom:8}}>⭐ Toca la estrella para marcar tu partido fetiche (solo uno)</div>
       <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
         {gs.map(g=>{
           const total=PM.filter(m=>m.g===g).length;
           const done=PM.filter(m=>m.g===g&&mp[m.id]&&mp[m.id].l!==""&&mp[m.id].v!=="").length;
+          const hasFetiche=PM.filter(m=>m.g===g).some(m=>m.id===fetiche);
           return(
-            <button key={g} style={{...S.chip,...(gr===g?S.chipA:{}),position:"relative"}} onClick={()=>setGr(g)}>
+            <button key={g} style={{...S.chip,...(gr===g?S.chipA:{}),position:"relative",...(hasFetiche?{borderColor:"#fbbf2466"}:{})}} onClick={()=>setGr(g)}>
               Gr.{g}
               {done===total&&<span style={{position:"absolute",top:-5,right:-5,background:"#4ade80",color:"#000",borderRadius:"50%",width:13,height:13,fontSize:9,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900}}>✓</span>}
             </button>
@@ -553,19 +662,27 @@ function GruposSec({mp,gr,setGr,upM,grupoM,results,locked}){
       {grupoM.map(m=>{
         const pred=mp[m.id]||{};
         const res=results[m.id]||m.result;
-        const pts=res?mPts(pred,res,"grupos"):null;
+        const pts=res?mPts(pred,res,"grupos",m.id===fetiche):null;
         const filled=pred.l!==""&&pred.v!=="";
+        const isFet=m.id===fetiche;
         return(
-          <div key={m.id} style={{...S.mCard,borderColor:res?"#4ade8033":filled?"#fbbf2433":"#141420"}}>
-            <div style={{fontSize:11,color:"#333",marginBottom:6}}>{fd(m.d)}</div>
+          <div key={m.id} style={{...S.mCard,borderColor:isFet?"#fbbf24":res?"#4ade8033":filled?"#fbbf2422":"#141420"}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:6,alignItems:"center"}}>
+              <span style={{fontSize:11,color:"#333"}}>{fd(m.d)}</span>
+              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                {isFet&&<span style={{fontSize:10,color:"#fbbf24",fontWeight:700}}>×3/×2</span>}
+                {!locked&&<button onClick={()=>setFetiche(m.id)} style={{background:"none",border:"none",cursor:"pointer",fontSize:18,padding:0,opacity:isFet?1:.3,filter:isFet?"none":"grayscale(1)"}}>⭐</button>}
+                {locked&&isFet&&<span style={{fontSize:16}}>⭐</span>}
+              </div>
+            </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 42px 14px 42px 1fr",alignItems:"center",gap:4}}>
               <div style={{textAlign:"right",fontWeight:600,color:"#ddd",fontSize:12,lineHeight:1.3}}>{m.l}</div>
-              <input type="number" min={0} max={20} value={pred.l||""} onChange={e=>!locked&&upM(m.id,"l",e.target.value)} style={{...S.scoreI,opacity:locked?.5:1}} disabled={locked} placeholder="?"/>
+              <input type="number" min={0} max={20} value={pred.l||""} onChange={e=>!locked&&upM(m.id,"l",e.target.value)} style={{...S.scoreI,opacity:locked?.5:1,...(isFet?{borderColor:"#fbbf24"}:{})}} disabled={locked} placeholder="?"/>
               <span style={{textAlign:"center",color:"#1e1e1e",fontWeight:700}}>–</span>
-              <input type="number" min={0} max={20} value={pred.v||""} onChange={e=>!locked&&upM(m.id,"v",e.target.value)} style={{...S.scoreI,opacity:locked?.5:1}} disabled={locked} placeholder="?"/>
+              <input type="number" min={0} max={20} value={pred.v||""} onChange={e=>!locked&&upM(m.id,"v",e.target.value)} style={{...S.scoreI,opacity:locked?.5:1,...(isFet?{borderColor:"#fbbf24"}:{})}} disabled={locked} placeholder="?"/>
               <div style={{fontWeight:600,color:"#ddd",fontSize:12,lineHeight:1.3}}>{m.v}</div>
             </div>
-            {res&&<div style={{textAlign:"center",fontSize:11,marginTop:6}}><span style={{color:"#4ade80"}}>Real: {res.l}–{res.v}</span>{pts!==null&&<span style={{color:"#fbbf24",marginLeft:8,fontWeight:700}}>+{pts}pts</span>}</div>}
+            {res&&<div style={{textAlign:"center",fontSize:11,marginTop:6}}><span style={{color:"#4ade80"}}>Real: {res.l}–{res.v}</span>{pts!==null&&<span style={{color:isFet?"#fbbf24":"#4ade80",marginLeft:8,fontWeight:700}}>{isFet?"⭐":""} +{pts}pts</span>}</div>}
           </div>
         );
       })}
@@ -573,7 +690,8 @@ function GruposSec({mp,gr,setGr,upM,grupoM,results,locked}){
   );
 }
 
-function ElimSec({mp,upM,elimM,locked}){
+// ── ELIM SECTION ──────────────────────────────────────────────────────────────
+function ElimSec({mp,upM,elimM,locked,fetiche,setFetiche}){
   if(!elimM||elimM.length===0)return(
     <div style={{...S.empty,paddingTop:50}}>
       <div style={{fontSize:36}}>⏳</div>
@@ -583,24 +701,30 @@ function ElimSec({mp,upM,elimM,locked}){
   );
   return(
     <div>
+      <div style={{fontSize:11,color:"#fbbf24",marginBottom:8}}>⭐ Toca la estrella para marcar tu partido fetiche (solo uno)</div>
       {elimM.map(m=>{
         const pred=mp[m.id]||{};
         const res=m.result;
-        const pts=res?mPts(pred,res,m.ph):null;
+        const pts=res?mPts(pred,res,m.ph,m.id===fetiche):null;
+        const isFet=m.id===fetiche;
         return(
-          <div key={m.id} style={{...S.mCard,borderColor:res?"#4ade8033":"#141420"}}>
-            <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-              <span style={{fontSize:11,color:"#333"}}>{fd(m.date||"")}</span>
-              <span style={{fontSize:11,color:"#60a5fa",fontWeight:700}}>{PHL[m.ph]} ·×{MULT[m.ph]}</span>
+          <div key={m.id} style={{...S.mCard,borderColor:isFet?"#fbbf24":res?"#4ade8033":"#141420"}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:6,alignItems:"center"}}>
+              <div><span style={{fontSize:11,color:"#444"}}>{fd(m.date||"")}</span><span style={{fontSize:11,color:"#60a5fa",fontWeight:700,marginLeft:8}}>{PHL[m.ph]} ·×{MULT[m.ph]}</span></div>
+              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                {isFet&&<span style={{fontSize:10,color:"#fbbf24",fontWeight:700}}>×3/×2</span>}
+                {!locked&&<button onClick={()=>setFetiche(m.id)} style={{background:"none",border:"none",cursor:"pointer",fontSize:18,padding:0,opacity:isFet?1:.3,filter:isFet?"none":"grayscale(1)"}}>⭐</button>}
+                {locked&&isFet&&<span style={{fontSize:16}}>⭐</span>}
+              </div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 42px 14px 42px 1fr",alignItems:"center",gap:4}}>
               <div style={{textAlign:"right",fontWeight:600,color:"#ddd",fontSize:12}}>{m.l}</div>
-              <input type="number" min={0} max={20} value={pred.l||""} onChange={e=>!locked&&upM(m.id,"l",e.target.value)} style={{...S.scoreI,opacity:locked?.5:1}} disabled={locked} placeholder="?"/>
+              <input type="number" min={0} max={20} value={pred.l||""} onChange={e=>!locked&&upM(m.id,"l",e.target.value)} style={{...S.scoreI,opacity:locked?.5:1,...(isFet?{borderColor:"#fbbf24"}:{})}} disabled={locked} placeholder="?"/>
               <span style={{textAlign:"center",color:"#1e1e1e",fontWeight:700}}>–</span>
-              <input type="number" min={0} max={20} value={pred.v||""} onChange={e=>!locked&&upM(m.id,"v",e.target.value)} style={{...S.scoreI,opacity:locked?.5:1}} disabled={locked} placeholder="?"/>
+              <input type="number" min={0} max={20} value={pred.v||""} onChange={e=>!locked&&upM(m.id,"v",e.target.value)} style={{...S.scoreI,opacity:locked?.5:1,...(isFet?{borderColor:"#fbbf24"}:{})}} disabled={locked} placeholder="?"/>
               <div style={{fontWeight:600,color:"#ddd",fontSize:12}}>{m.v}</div>
             </div>
-            {res&&<div style={{textAlign:"center",fontSize:11,marginTop:6}}><span style={{color:"#4ade80"}}>Real: {res.l}–{res.v}</span>{pts!==null&&<span style={{color:"#fbbf24",marginLeft:8,fontWeight:700}}>+{pts}pts</span>}</div>}
+            {res&&<div style={{textAlign:"center",fontSize:11,marginTop:6}}><span style={{color:"#4ade80"}}>Real: {res.l}–{res.v}</span>{pts!==null&&<span style={{color:isFet?"#fbbf24":"#4ade80",marginLeft:8,fontWeight:700}}>{isFet?"⭐":""} +{pts}pts</span>}</div>}
           </div>
         );
       })}
@@ -608,6 +732,7 @@ function ElimSec({mp,upM,elimM,locked}){
   );
 }
 
+// ── RETOS SECTION ─────────────────────────────────────────────────────────────
 function RetosSec({spc,upSpc,locked}){
   return(
     <div>
@@ -632,6 +757,7 @@ function RetosSec({spc,upSpc,locked}){
   );
 }
 
+// ── PARTIDOS TAB ──────────────────────────────────────────────────────────────
 function PartidosTab({allM}){
   const[gf,setGf]=useState("A");
   const gs=Object.keys(GR);
@@ -661,13 +787,15 @@ function PartidosTab({allM}){
   );
 }
 
+// ── REGLAS TAB ────────────────────────────────────────────────────────────────
 function ReglasTab(){
   const B=[
     {t:"1️⃣ Pre-Mundial",c:"#fbbf24",items:[["Campeón","30pts"],["Subcampeón","20pts"],["3er puesto","15pts"],["Máx. goleador","20pts"],["MVP","15pts"],["4 Semifinalistas","10pts c/u"]]},
     {t:"2️⃣ Por partido",c:"#4ade80",items:[["Resultado exacto","5pts"],["Ganador/empate","2pts"],["Goles de un equipo","1pt c/u"]]},
-    {t:"3️⃣ Multiplicadores",c:"#60a5fa",items:[["Grupos","×1"],["Octavos","×1.5"],["Cuartos","×2"],["Semis","×3"],["Final","×5"]]},
+    {t:"⭐ Partido Fetiche",c:"#fbbf24",items:[["Si aciertas resultado exacto","pts ×3"],["Si aciertas 1X2","pts ×2"],["Solo 1 por participante","Elige bien"]]},
+    {t:"3️⃣ Multiplicadores fase",c:"#60a5fa",items:[["Grupos","×1"],["Octavos","×1.5"],["Cuartos","×2"],["Semis","×3"],["Final","×5"]]},
     {t:"4️⃣ Retos especiales",c:"#f472b6",items:[["Primer expulsado","10pts"],["Primer hat-trick","10pts"],["Equipo revelación","15pts"],["Mayor goleada","10pts"]]},
-    {t:"💰 Premios",c:"#fb923c",items:[["1er puesto","60% del bote"],["2º puesto","30% del bote"],["3er puesto","10% del bote"],["Farolillo rojo","¡Ronda épica!"]]},
+    {t:"💰 Premios",c:"#fb923c",items:[["1er puesto","60% del bote"],["2º puesto","25% del bote"],["3er puesto","15% del bote"],["Farolillo rojo","¡Ronda épica!"]]},
   ];
   return(
     <div>
@@ -688,14 +816,16 @@ function ReglasTab(){
   );
 }
 
+// ── COMPARE VIEW ──────────────────────────────────────────────────────────────
 function CompareView({p,allM,scores,db,bote,onBack}){
   const[gr,setGr]=useState("A");
   const playedM=allM.filter(m=>m.result);
   const grupoPlayed=playedM.filter(m=>m.g===gr);
   const mp=p.mp||{};
+  const fetiche=p.fetiche||null;
   const pp=prePts(p.pre||{},db.rPre);
   const sp=spcPts(p.spc||{},db.rSpc);
-  let matchT=0;playedM.forEach(m=>{matchT+=mPts(mp[m.id],m.result,m.ph||"grupos");});
+  let matchT=0;playedM.forEach(m=>{matchT+=mPts(mp[m.id],m.result,m.ph||"grupos",m.id===fetiche);});
   matchT=Math.round(matchT*10)/10;
   const pos=scores.findIndex(x=>x.id===p.id)+1;
   const gs=Object.keys(GR);
@@ -710,13 +840,14 @@ function CompareView({p,allM,scores,db,bote,onBack}){
       </div>
       <div style={S.content}>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
-          {[{l:"Posición",v:"#"+pos,c:"#fbbf24"},{l:"Total",v:(scores.find(x=>x.id===p.id)?.tot||0)+" pts",c:"#4ade80"},{l:"Pre-Mundial",v:pp+" pts",c:"#60a5fa"},{l:"Partidos",v:matchT+" pts",c:"#a78bfa"},{l:"Retos",v:sp+" pts",c:"#f472b6"},{l:"Premio est.",v:pos<=3?Math.round(bote*[.6,.3,.1][pos-1])+"€":"—",c:"#4ade80"}].map(x=>(
+          {[{l:"Posición",v:"#"+pos,c:"#fbbf24"},{l:"Total",v:(scores.find(x=>x.id===p.id)?.tot||0)+" pts",c:"#4ade80"},{l:"Pre-Mundial",v:pp+" pts",c:"#60a5fa"},{l:"Partidos",v:matchT+" pts",c:"#a78bfa"},{l:"Retos",v:sp+" pts",c:"#f472b6"},{l:"Premio est.",v:pos<=3?Math.round(bote*[.6,.25,.15][pos-1])+"€":"—",c:"#4ade80"}].map(x=>(
             <div key={x.l} style={{background:"#0d0d14",border:"1px solid #141420",borderRadius:10,padding:"10px 12px"}}>
               <div style={{fontSize:11,color:"#444"}}>{x.l}</div>
               <div style={{fontWeight:800,fontSize:17,color:x.c,marginTop:2}}>{x.v}</div>
             </div>
           ))}
         </div>
+        {fetiche&&<div style={{background:"#1a1400",border:"1px solid #fbbf2444",borderRadius:10,padding:"10px 12px",marginBottom:12,fontSize:12,color:"#fbbf24"}}>⭐ Partido fetiche: {(allM.find(m=>m.id===fetiche)||{l:"?",v:"?"}).l} vs {(allM.find(m=>m.id===fetiche)||{l:"?",v:"?"}).v}</div>}
         {db.rPre&&(
           <div style={{background:"#0d0d14",borderLeft:"3px solid #60a5fa",borderRadius:10,padding:"12px",marginBottom:12}}>
             <div style={{fontWeight:700,color:"#60a5fa",fontSize:13,marginBottom:8}}>🏆 Pre-Mundial — {pp} pts</div>
@@ -740,11 +871,12 @@ function CompareView({p,allM,scores,db,bote,onBack}){
             {grupoPlayed.length===0?<div style={{color:"#333",textAlign:"center",padding:"16px",fontSize:13}}>Sin partidos jugados aquí</div>:
               grupoPlayed.map(m=>{
                 const pred=mp[m.id];
-                const pts=mPts(pred,m.result,m.ph||"grupos");
+                const isFet=m.id===fetiche;
+                const pts=mPts(pred,m.result,m.ph||"grupos",isFet);
                 return(
                   <div key={m.id} style={{background:"#0d0d14",border:"1px solid "+(pts>0?"#4ade8022":"#141420"),borderRadius:8,padding:"10px",marginBottom:6}}>
                     <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-                      <span style={{fontSize:11,color:"#333"}}>{fd(m.d||"")}</span>
+                      <span style={{fontSize:11,color:"#333"}}>{fd(m.d||"")} {isFet&&<span style={{color:"#fbbf24"}}>⭐</span>}</span>
                       <span style={{fontSize:12,fontWeight:700,color:pts>0?"#4ade80":"#444"}}>+{pts}pts</span>
                     </div>
                     <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:8,alignItems:"center"}}>
@@ -766,6 +898,7 @@ function CompareView({p,allM,scores,db,bote,onBack}){
   );
 }
 
+// ── ADMIN VIEW ────────────────────────────────────────────────────────────────
 function AdminView({db,upDb,allM,onBack}){
   const[tab,setTab]=useState("res");
   const[gf,setGf]=useState("A");
@@ -788,6 +921,14 @@ function AdminView({db,upDb,allM,onBack}){
     setEid(null);setSaving(false);
   };
 
+  const resetRes=async id=>{
+    const newRes={...(db.results||{})};
+    delete newRes[id];
+    await upDb("results",newRes);
+    const newEM=(db.extraM||[]).map(m=>m.id===id?{...m,result:null}:m);
+    await upDb("extraM",newEM);
+  };
+
   return(
     <div style={S.app}>
       <div style={S.hdr}>
@@ -803,6 +944,7 @@ function AdminView({db,upDb,allM,onBack}){
         ))}
       </div>
       <div style={S.content}>
+
         {tab==="res"&&(
           <div>
             <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
@@ -816,7 +958,10 @@ function AdminView({db,upDb,allM,onBack}){
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontWeight:600,color:"#ddd",fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.l} vs {m.v}</div>
                     <div style={{fontSize:10,color:"#333"}}>{fd(m.d||m.date||"")}{m.ph!=="grupos"?" · "+PHL[m.ph]:""}</div>
-                    {res&&<div style={{color:"#4ade80",fontWeight:700,fontSize:11,marginTop:1}}>✅ {res.l}–{res.v}</div>}
+                    {res&&<div style={{display:"flex",alignItems:"center",gap:8,marginTop:2}}>
+                      <span style={{color:"#4ade80",fontWeight:700,fontSize:11}}>✅ {res.l}–{res.v}</span>
+                      <button style={{background:"#7f1d1d",border:"none",borderRadius:4,padding:"1px 6px",color:"#fff",fontSize:10,cursor:"pointer"}} onClick={()=>resetRes(m.id)}>Reset</button>
+                    </div>}
                   </div>
                   {eid===m.id?(
                     <div style={{display:"flex",gap:3,alignItems:"center",flexShrink:0}}>
@@ -834,6 +979,7 @@ function AdminView({db,upDb,allM,onBack}){
             })}
           </div>
         )}
+
         {tab==="pre"&&(
           <div>
             {[["campeon","🏆 Campeón"],["subcampeon","🥈 Subcampeón"],["tercero","🥉 3er puesto"]].map(([k,l])=>(
@@ -851,6 +997,7 @@ function AdminView({db,upDb,allM,onBack}){
             {db.rPre&&<button style={{...S.btnAct,width:"100%",marginTop:8,background:"#7f1d1d",padding:"9px",display:"flex",justifyContent:"center"}} onClick={async()=>upDb("rPre",null)}>🔓 Desbloquear preds.</button>}
           </div>
         )}
+
         {tab==="spc"&&(
           <div>
             {[["expulsado","🟥 Primer expulsado"],["hattrick","🎩 Primer hat-trick"],["goleada","🎯 Mayor goleada"]].map(([k,l])=>(
@@ -860,6 +1007,7 @@ function AdminView({db,upDb,allM,onBack}){
             <button style={{...S.btnGold,width:"100%"}} onClick={async()=>{setSaving(true);await upDb("rSpc",sf);setSaving(false);}}>💾 Guardar retos</button>
           </div>
         )}
+
         {tab==="ext"&&(
           <div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
@@ -883,15 +1031,24 @@ function AdminView({db,upDb,allM,onBack}){
             ))}
           </div>
         )}
+
         {tab==="cfg"&&(
           <div>
             <div style={{background:"#0d0d14",border:"1px solid #1e1e2e",borderRadius:12,padding:"14px",marginBottom:14}}>
               <div style={{fontWeight:700,color:"#ddd",fontSize:13,marginBottom:4}}>📅 Fecha límite</div>
-              <div style={{fontSize:12,color:"#444",marginBottom:8}}>Pasada esta fecha nadie puede registrarse</div>
               <input style={S.inp} type="date" value={db.deadline||""} onChange={async e=>upDb("deadline",e.target.value)}/>
               {db.deadline&&<div style={{fontSize:12,color:isPast(db.deadline)?"#ef4444":"#4ade80",marginTop:6}}>{isPast(db.deadline)?"🔒 CERRADO":"⏰ Abierto hasta "+fd(db.deadline)}</div>}
               {db.deadline&&<button style={{...S.btnAct,marginTop:8,background:"#7f1d1d"}} onClick={async()=>upDb("deadline","")}>Quitar límite</button>}
             </div>
+
+            <div style={{background:"#0d0d14",border:"1px solid #1e2e0e",borderRadius:12,padding:"14px",marginBottom:14}}>
+              <div style={{fontWeight:700,color:"#4ade80",fontSize:13,marginBottom:8}}>📥 Exportar datos</div>
+              <div style={{fontSize:12,color:"#555",marginBottom:10}}>Descarga un CSV con todos los pronósticos y puntuaciones</div>
+              <button style={{...S.btnGold,width:"100%",background:"linear-gradient(135deg,#065f46,#047857)"}} onClick={()=>exportCSV(db.parts||[],allM,db.rPre,db.rSpc)}>
+                📥 Descargar CSV completo
+              </button>
+            </div>
+
             <div style={{background:"#0d0d14",border:"1px solid #1e1e2e",borderRadius:12,padding:"14px",marginBottom:14}}>
               <div style={{fontWeight:700,color:"#ddd",fontSize:13,marginBottom:10}}>👤 Participantes</div>
               {(db.parts||[]).length===0?<div style={{color:"#333",fontSize:13}}>Sin participantes</div>:(db.parts||[]).map(p=>(
@@ -902,6 +1059,7 @@ function AdminView({db,upDb,allM,onBack}){
                 </div>
               ))}
             </div>
+
             <div style={{background:"#0d0d14",border:"1px solid #3a0a0a",borderRadius:12,padding:"14px"}}>
               <div style={{fontWeight:700,color:"#ff6b35",fontSize:13,marginBottom:8}}>⚠ Zona peligrosa</div>
               <button style={{...S.btnAct,background:"#7f1d1d",width:"100%",padding:"10px"}} onClick={async()=>{
