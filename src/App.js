@@ -111,8 +111,8 @@ function mPts(pred,res,ph,isFetiche){
   if(pl===rl)b+=1;if(pv===rv)b+=1;
   let pts=Math.round(b*m*10)/10;
   if(isFetiche){
-    if(exacto)pts=Math.round(pts*3*10)/10;
-    else if(b>=2)pts=Math.round(pts*2*10)/10;
+    if(exacto)pts=Math.round(pts*5*10)/10;
+    else if(b>=2)pts=Math.round(pts*3*10)/10;
   }
   return pts;
 }
@@ -287,6 +287,23 @@ export default function App(){
     await dbSet(key,val);
     setDb(d=>({...d,[key]:val}));
   };
+  // ── BORRADOR AUTO-SAVE ──────────────────────────────────────────────────────
+  const saveDraft = useCallback(async(name, draftData) => {
+    const key = "draft_" + name.trim().toLowerCase().replace(/\s+/g,"_");
+    await dbSet(key, {...draftData, _draftName: name, _savedAt: new Date().toISOString()});
+  }, []);
+
+  const loadDraft = useCallback(async(name) => {
+    const key = "draft_" + name.trim().toLowerCase().replace(/\s+/g,"_");
+    return await dbGet(key);
+  }, []);
+
+  const deleteDraft = useCallback(async(name) => {
+    const key = "draft_" + name.trim().toLowerCase().replace(/\s+/g,"_");
+    await dbSet(key, null);
+  }, []);
+
+
 
   const allM=[...PM.map(m=>({...m,ph:"grupos",result:(db.results||{})[m.id]||null})),...(db.extraM||[])];
   const closed=isPast(db.deadline);
@@ -308,7 +325,7 @@ export default function App(){
       <CountdownWidget/>
       <div style={{width:"100%",maxWidth:400,background:"#0d0d14",border:"1px solid #1e1e2e",borderRadius:14,padding:"18px",marginBottom:24}}>
         <div style={{color:"#fbbf24",fontWeight:700,fontSize:13,marginBottom:12}}>📋 Cómo funciona</div>
-        {[["🎟","Inscripción","20€ — una vez confirmado, bloqueado para siempre"],["⚽","72 partidos","Pronostica todos los partidos de la fase de grupos"],["⭐","Partido fetiche","Márcalo: si aciertas exacto ×3, si aciertas 1X2 ×2"],["📈","Multiplicadores","×1 grupos · ×1.5 octavos · hasta ×5 final"],["💰","Premios","60% · 25% · 15% del bote total"]].map(([i,t,d])=>(
+        {[["🎟","Inscripción","20€ — una vez confirmado, bloqueado para siempre"],["⚽","72 partidos","Pronostica todos los partidos de la fase de grupos"],["⭐","Partido fetiche","Márcalo: si aciertas exacto ×5, si aciertas 1X2 ×3"],["📈","Multiplicadores","×1 grupos · ×1.5 octavos · hasta ×5 final"],["💰","Premios","60% · 25% · 15% del bote total"]].map(([i,t,d])=>(
           <div key={t} style={{display:"flex",gap:10,marginBottom:10}}>
             <span style={{fontSize:16,flexShrink:0}}>{i}</span>
             <div><div style={{color:"#fff",fontWeight:600,fontSize:13}}>{t}</div><div style={{color:"#555",fontSize:12}}>{d}</div></div>
@@ -322,7 +339,7 @@ export default function App(){
     </div>
   );
 
-  if(view==="register")return <RegisterView db={db} upDb={upDb} closed={closed} onDone={()=>setView("main")} onBack={()=>setView("main")}/>;
+  if(view==="register")return <RegisterView db={db} upDb={upDb} closed={closed} saveDraft={saveDraft} loadDraft={loadDraft} deleteDraft={deleteDraft} onDone={()=>setView("main")} onBack={()=>setView("main")}/>;
   if(view==="predict"&&selId){
     const p=(db.parts||[]).find(x=>x.id===selId);
     if(!p){setView("main");return null;}
@@ -468,14 +485,43 @@ export default function App(){
 }
 
 // ── REGISTER ──────────────────────────────────────────────────────────────────
-function RegisterView({db,upDb,closed,onDone,onBack}){
+function RegisterView({db,upDb,closed,saveDraft,loadDraft,deleteDraft,onDone,onBack}){
   const[step,setStep]=useState("form");
   const[name,setName]=useState("");
   const[err,setErr]=useState("");
   const[saving,setSaving]=useState(false);
+  const[hasDraft,setHasDraft]=useState(false);
+  const[draftLoading,setDraftLoading]=useState(false);
   const[draft,setDraft]=useState({pre:{campeon:"",subcampeon:"",tercero:"",goleador:"",mvp:"",semis:["","","",""]},spc:{expulsado:"",hattrick:"",revelacion:"",goleada:""},mp:{},fetiche:null});
   const[sec,setSec]=useState("pre");
   const[gr,setGr]=useState("A");
+
+  // Auto-save draft every time draft changes (after name is set)
+  useEffect(()=>{
+    if(name.trim()&&step==="predict"){
+      const t=setTimeout(()=>saveDraft(name,draft),1500);
+      return()=>clearTimeout(t);
+    }
+  },[draft,name,step,saveDraft]);
+
+  const checkDraft=async(n)=>{
+    if(!n.trim())return;
+    setDraftLoading(true);
+    const d=await loadDraft(n);
+    setHasDraft(!!d&&d._draftName);
+    setDraftLoading(false);
+  };
+
+  const resumeDraft=async()=>{
+    setDraftLoading(true);
+    const d=await loadDraft(name);
+    if(d){
+      const{_draftName,_savedAt,...rest}=d;
+      setDraft(rest);
+      setStep("predict");
+    }
+    setDraftLoading(false);
+  };
 
   const next=()=>{
     const n=name.trim();
@@ -487,6 +533,7 @@ function RegisterView({db,upDb,closed,onDone,onBack}){
     setSaving(true);
     const np={id:Date.now().toString(),name:name.trim(),pre:draft.pre,spc:draft.spc,mp:draft.mp,fetiche:draft.fetiche,locked:true,registeredAt:new Date().toISOString()};
     await upDb("parts",[...(db.parts||[]),np]);
+    await deleteDraft(name);
     setSaving(false);onDone();
   };
   const upPre=(k,v)=>setDraft(d=>({...d,pre:{...d.pre,[k]:v}}));
@@ -507,7 +554,12 @@ function RegisterView({db,upDb,closed,onDone,onBack}){
         <div style={S.hdrRow}>
           <button style={S.backBtn} onClick={step==="form"?onBack:()=>setStep("form")}>◀</button>
           <div style={{textAlign:"center"}}><div style={{fontWeight:800,fontSize:16,color:"#fbbf24"}}>{step==="form"?"🎟 Nueva inscripción":"🎯 Tus pronósticos"}</div>{step==="predict"&&<div style={{fontSize:11,color:"#666"}}>{name}</div>}</div>
-          {step==="predict"?<button style={{...S.btnGold,...(saving?{opacity:.5}:{})}} onClick={!saving?confirm:undefined}>{saving?"…":"✅ Confirmar"}</button>:<div/>}
+          {step==="predict"?(
+            <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}>
+              <button style={{...S.btnGold,...(saving?{opacity:.5}:{})}} onClick={!saving?confirm:undefined}>{saving?"…":"✅ Confirmar"}</button>
+              <div style={{fontSize:9,color:"#555"}}>💾 guardado auto</div>
+            </div>
+          ):<div/>}
         </div>
       </div>
       {step==="form"&&(
@@ -519,10 +571,23 @@ function RegisterView({db,upDb,closed,onDone,onBack}){
           </div>
           <div style={{marginBottom:14}}>
             <div style={S.fl}>Tu nombre</div>
-            <input style={{...S.inp,...(err?{borderColor:"#ef4444"}:{})}} placeholder="¿Cómo te llamas?" value={name} onChange={e=>{setName(e.target.value);setErr("");}} onKeyDown={e=>e.key==="Enter"&&next()}/>
+            <input style={{...S.inp,...(err?{borderColor:"#ef4444"}:{})}} placeholder="¿Cómo te llamas?" value={name}
+              onChange={e=>{setName(e.target.value);setErr("");setHasDraft(false);}}
+              onBlur={e=>checkDraft(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&next()}/>
             {err&&<div style={{color:"#ef4444",fontSize:12,marginTop:4}}>⚠ {err}</div>}
           </div>
-          <button style={{...S.btnGold,width:"100%",padding:"14px",fontSize:15,borderRadius:12}} onClick={next}>Continuar →</button>
+          {hasDraft&&(
+            <div style={{background:"#1a1400",border:"1px solid #fbbf2466",borderRadius:10,padding:"12px",marginBottom:12}}>
+              <div style={{color:"#fbbf24",fontWeight:700,fontSize:13,marginBottom:6}}>💾 Tienes un borrador guardado</div>
+              <div style={{color:"#888",fontSize:12,marginBottom:10}}>Puedes continuar donde lo dejaste o empezar de cero</div>
+              <div style={{display:"flex",gap:8}}>
+                <button style={{...S.btnGold,flex:1}} onClick={resumeDraft}>▶ Continuar borrador</button>
+                <button style={{...S.btnAct,flex:1}} onClick={()=>{setHasDraft(false);next();}}>🗑 Empezar de cero</button>
+              </div>
+            </div>
+          )}
+          {!hasDraft&&<button style={{...S.btnGold,width:"100%",padding:"14px",fontSize:15,borderRadius:12}} onClick={next}>{draftLoading?"Buscando borrador…":"Continuar →"}</button>}
         </div>
       )}
       {step==="predict"&&(
@@ -670,7 +735,7 @@ function GruposSec({mp,gr,setGr,upM,grupoM,results,locked,fetiche,setFetiche}){
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:6,alignItems:"center"}}>
               <span style={{fontSize:11,color:"#333"}}>{fd(m.d)}</span>
               <div style={{display:"flex",alignItems:"center",gap:6}}>
-                {isFet&&<span style={{fontSize:10,color:"#fbbf24",fontWeight:700}}>×3/×2</span>}
+                {isFet&&<span style={{fontSize:10,color:"#fbbf24",fontWeight:700}}>×5/×3</span>}
                 {!locked&&<button onClick={()=>setFetiche(m.id)} style={{background:"none",border:"none",cursor:"pointer",fontSize:18,padding:0,opacity:isFet?1:.3,filter:isFet?"none":"grayscale(1)"}}>⭐</button>}
                 {locked&&isFet&&<span style={{fontSize:16}}>⭐</span>}
               </div>
@@ -712,7 +777,7 @@ function ElimSec({mp,upM,elimM,locked,fetiche,setFetiche}){
             <div style={{display:"flex",justifyContent:"space-between",marginBottom:6,alignItems:"center"}}>
               <div><span style={{fontSize:11,color:"#444"}}>{fd(m.date||"")}</span><span style={{fontSize:11,color:"#60a5fa",fontWeight:700,marginLeft:8}}>{PHL[m.ph]} ·×{MULT[m.ph]}</span></div>
               <div style={{display:"flex",alignItems:"center",gap:6}}>
-                {isFet&&<span style={{fontSize:10,color:"#fbbf24",fontWeight:700}}>×3/×2</span>}
+                {isFet&&<span style={{fontSize:10,color:"#fbbf24",fontWeight:700}}>×5/×3</span>}
                 {!locked&&<button onClick={()=>setFetiche(m.id)} style={{background:"none",border:"none",cursor:"pointer",fontSize:18,padding:0,opacity:isFet?1:.3,filter:isFet?"none":"grayscale(1)"}}>⭐</button>}
                 {locked&&isFet&&<span style={{fontSize:16}}>⭐</span>}
               </div>
@@ -792,7 +857,7 @@ function ReglasTab(){
   const B=[
     {t:"1️⃣ Pre-Mundial",c:"#fbbf24",items:[["Campeón","30pts"],["Subcampeón","20pts"],["3er puesto","15pts"],["Máx. goleador","20pts"],["MVP","15pts"],["4 Semifinalistas","10pts c/u"]]},
     {t:"2️⃣ Por partido",c:"#4ade80",items:[["Resultado exacto","5pts"],["Ganador/empate","2pts"],["Goles de un equipo","1pt c/u"]]},
-    {t:"⭐ Partido Fetiche",c:"#fbbf24",items:[["Si aciertas resultado exacto","pts ×3"],["Si aciertas 1X2","pts ×2"],["Solo 1 por participante","Elige bien"]]},
+    {t:"⭐ Partido Fetiche",c:"#fbbf24",items:[["Si aciertas resultado exacto","pts ×5"],["Si aciertas 1X2","pts ×3"],["Solo 1 por participante","Elige bien"]]},
     {t:"3️⃣ Multiplicadores fase",c:"#60a5fa",items:[["Grupos","×1"],["Octavos","×1.5"],["Cuartos","×2"],["Semis","×3"],["Final","×5"]]},
     {t:"4️⃣ Retos especiales",c:"#f472b6",items:[["Primer expulsado","10pts"],["Primer hat-trick","10pts"],["Equipo revelación","15pts"],["Mayor goleada","10pts"]]},
     {t:"💰 Premios",c:"#fb923c",items:[["1er puesto","60% del bote"],["2º puesto","25% del bote"],["3er puesto","15% del bote"],["Farolillo rojo","¡Ronda épica!"]]},
